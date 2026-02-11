@@ -30,6 +30,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: acp-traces-windows-amd64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: acp-traces-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +75,7 @@ jobs:
             acp-traces-macos-arm64
             acp-traces-macos-amd64
             acp-traces-windows-amd64.exe
+            acp-traces-windows-arm64.exe
 
   update-homebrew:
     needs: release
