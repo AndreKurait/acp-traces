@@ -63,3 +63,75 @@ jobs:
             acp-traces-linux-arm64
             acp-traces-macos-arm64
             acp-traces-macos-amd64
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Compute SHAs and update formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_MACOS_ARM64=$(shasum -a 256 acp-traces-macos-arm64 | cut -d' ' -f1)
+          SHA_MACOS_AMD64=$(shasum -a 256 acp-traces-macos-amd64 | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(shasum -a 256 acp-traces-linux-arm64 | cut -d' ' -f1)
+          SHA_LINUX_AMD64=$(shasum -a 256 acp-traces-linux-amd64 | cut -d' ' -f1)
+
+          cat > formula.rb << 'FORMULA'
+          class AcpTraces < Formula
+            desc "OTel tracing proxy for Agent Client Protocol"
+            homepage "https://github.com/AndreKurait/acp-traces"
+            license "Apache-2.0"
+            version "VERSION_PLACEHOLDER"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/AndreKurait/acp-traces/releases/download/v#{version}/acp-traces-macos-arm64"
+                sha256 "SHA_MACOS_ARM64_PLACEHOLDER"
+              else
+                url "https://github.com/AndreKurait/acp-traces/releases/download/v#{version}/acp-traces-macos-amd64"
+                sha256 "SHA_MACOS_AMD64_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/AndreKurait/acp-traces/releases/download/v#{version}/acp-traces-linux-arm64"
+                sha256 "SHA_LINUX_ARM64_PLACEHOLDER"
+              else
+                url "https://github.com/AndreKurait/acp-traces/releases/download/v#{version}/acp-traces-linux-amd64"
+                sha256 "SHA_LINUX_AMD64_PLACEHOLDER"
+              end
+            end
+
+            def install
+              binary = Dir.glob("acp-traces-*").first || "acp-traces"
+              mv binary, "acp-traces"
+              bin.install "acp-traces"
+            end
+
+            test do
+              assert_match "OTel tracing proxy", shell_output("#{bin}/acp-traces --help")
+            end
+          end
+          FORMULA
+
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/" formula.rb
+          sed -i "s/SHA_MACOS_ARM64_PLACEHOLDER/$SHA_MACOS_ARM64/" formula.rb
+          sed -i "s/SHA_MACOS_AMD64_PLACEHOLDER/$SHA_MACOS_AMD64/" formula.rb
+          sed -i "s/SHA_LINUX_ARM64_PLACEHOLDER/$SHA_LINUX_ARM64/" formula.rb
+          sed -i "s/SHA_LINUX_AMD64_PLACEHOLDER/$SHA_LINUX_AMD64/" formula.rb
+
+          # Push to homebrew-tap repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/AndreKurait/homebrew-tap.git tap
+          cp formula.rb tap/Formula/acp-traces.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/acp-traces.rb
+          git commit -m "Update acp-traces to $VERSION"
+          git push
