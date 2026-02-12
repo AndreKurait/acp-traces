@@ -18,7 +18,7 @@ struct SessionState {
 }
 
 struct PendingRequest {
-    span: opentelemetry::global::BoxedSpan,
+    span: Option<opentelemetry::global::BoxedSpan>,
     method: String,
     session_id: Option<String>,
     start: Instant,
@@ -36,6 +36,9 @@ pub struct SpanManager {
     protocol_version: Option<i64>,
     sessions: HashMap<String, SessionState>,
     pending: HashMap<String, PendingRequest>,
+    /// Root span for the entire ACP session — parents all other spans.
+    session_span: Option<opentelemetry::global::BoxedSpan>,
+    session_span_context: Option<SpanContext>,
 }
 
 impl SpanManager {
@@ -67,6 +70,8 @@ impl SpanManager {
             protocol_version: None,
             sessions: HashMap::new(),
             pending: HashMap::new(),
+            session_span: None,
+            session_span_context: None,
         }
     }
 
@@ -98,21 +103,35 @@ impl SpanManager {
                     self.client_name = Some(name.to_string());
                     self.client_version = version.map(|v| v.to_string());
                 }
-                let span = self
-                    .tracer
-                    .span_builder("initialize")
-                    .with_kind(SpanKind::Internal)
-                    .with_attributes(vec![
-                        KeyValue::new("rpc.system", "jsonrpc"),
-                        KeyValue::new("rpc.method", "initialize"),
-                        KeyValue::new("acp.method.name", "initialize"),
-                        KeyValue::new("network.transport", "pipe"),
-                    ])
-                    .start(&self.tracer);
+                // Create the root session span that parents everything.
+                if self.session_span.is_none() {
+                    let root = self
+                        .tracer
+                        .span_builder("acp_session")
+                        .with_kind(SpanKind::Internal)
+                        .with_attributes(vec![
+                            KeyValue::new("acp.method.name", "session"),
+                            KeyValue::new("network.transport", "pipe"),
+                        ])
+                        .start(&self.tracer);
+                    self.session_span_context = Some(root.span_context().clone());
+                    self.session_span = Some(root);
+                }
+                let span = self.start_under_root(
+                    self.tracer
+                        .span_builder("initialize")
+                        .with_kind(SpanKind::Internal)
+                        .with_attributes(vec![
+                            KeyValue::new("rpc.system", "jsonrpc"),
+                            KeyValue::new("rpc.method", "initialize"),
+                            KeyValue::new("acp.method.name", "initialize"),
+                            KeyValue::new("network.transport", "pipe"),
+                        ]),
+                );
                 self.pending.insert(
                     id.to_string(),
                     PendingRequest {
-                        span,
+                        span: Some(span),
                         method: method.to_string(),
                         session_id: None,
                         start: Instant::now(),
@@ -159,12 +178,12 @@ impl SpanManager {
                         ));
                     }
                 }
-                let span = self
-                    .tracer
-                    .span_builder(span_name)
-                    .with_kind(SpanKind::Client)
-                    .with_attributes(attrs)
-                    .start(&self.tracer);
+                let span = self.start_under_root(
+                    self.tracer
+                        .span_builder(span_name)
+                        .with_kind(SpanKind::Client)
+                        .with_attributes(attrs),
+                );
                 let span_context = span.span_context().clone();
                 let now = Instant::now();
                 self.sessions
@@ -186,7 +205,7 @@ impl SpanManager {
                 self.pending.insert(
                     id.to_string(),
                     PendingRequest {
-                        span: self.tracer.span_builder("_placeholder").start(&self.tracer),
+                        span: None,
                         method: method.to_string(),
                         session_id: Some(session_id),
                         start: now,
@@ -228,7 +247,7 @@ impl SpanManager {
                 self.pending.insert(
                     id.to_string(),
                     PendingRequest {
-                        span,
+                        span: Some(span),
                         method: m.to_string(),
                         session_id,
                         start: Instant::now(),
@@ -237,22 +256,22 @@ impl SpanManager {
             }
             _ => {
                 // Other requests: session/new, session/load, authenticate, etc.
-                let span = self
-                    .tracer
-                    .span_builder(method.to_string())
-                    .with_kind(SpanKind::Internal)
-                    .with_attributes(vec![
-                        KeyValue::new("rpc.system", "jsonrpc"),
-                        KeyValue::new("rpc.method", method.to_string()),
-                        KeyValue::new("acp.method.name", method.to_string()),
-                        KeyValue::new("network.transport", "pipe"),
-                        KeyValue::new("jsonrpc.request.id", id.to_string()),
-                    ])
-                    .start(&self.tracer);
+                let span = self.start_under_root(
+                    self.tracer
+                        .span_builder(method.to_string())
+                        .with_kind(SpanKind::Internal)
+                        .with_attributes(vec![
+                            KeyValue::new("rpc.system", "jsonrpc"),
+                            KeyValue::new("rpc.method", method.to_string()),
+                            KeyValue::new("acp.method.name", method.to_string()),
+                            KeyValue::new("network.transport", "pipe"),
+                            KeyValue::new("jsonrpc.request.id", id.to_string()),
+                        ]),
+                );
                 self.pending.insert(
                     id.to_string(),
                     PendingRequest {
-                        span,
+                        span: Some(span),
                         method: method.to_string(),
                         session_id: acp::extract_session_id(params).map(|s| s.to_string()),
                         start: Instant::now(),
@@ -273,29 +292,39 @@ impl SpanManager {
 
         match pending.method.as_str() {
             "initialize" => {
-                let mut span = pending.span;
-                if let Some(res) = result {
-                    if let Some((name, version)) = acp::extract_agent_info(res) {
-                        self.agent_name = Some(name.to_string());
-                        self.agent_version = version.map(|v| v.to_string());
-                        span.set_attribute(KeyValue::new("gen_ai.agent.name", name.to_string()));
-                        span.set_attribute(KeyValue::new("gen_ai.agent.id", name.to_string()));
+                if let Some(mut span) = pending.span {
+                    if let Some(res) = result {
+                        if let Some((name, version)) = acp::extract_agent_info(res) {
+                            self.agent_name = Some(name.to_string());
+                            self.agent_version = version.map(|v| v.to_string());
+                            span.set_attribute(KeyValue::new(
+                                "gen_ai.agent.name",
+                                name.to_string(),
+                            ));
+                            span.set_attribute(KeyValue::new("gen_ai.agent.id", name.to_string()));
+                        }
+                        self.protocol_version = res.get("protocolVersion").and_then(|v| v.as_i64());
+                        if let Some(pv) = self.protocol_version {
+                            span.set_attribute(KeyValue::new("acp.protocol.version", pv));
+                        }
                     }
-                    self.protocol_version = res.get("protocolVersion").and_then(|v| v.as_i64());
-                    if let Some(pv) = self.protocol_version {
-                        span.set_attribute(KeyValue::new("acp.protocol.version", pv));
+                    if let Some(err) = error {
+                        span.set_status(Status::error(err.to_string()));
+                        span.set_attribute(KeyValue::new(
+                            "error.type",
+                            err.get("code")
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "_OTHER".to_string()),
+                        ));
                     }
+                    // Update root session span with agent info
+                    if let Some(ref name) = self.agent_name {
+                        if let Some(ref mut root) = self.session_span {
+                            root.set_attribute(KeyValue::new("gen_ai.agent.name", name.clone()));
+                        }
+                    }
+                    span.end();
                 }
-                if let Some(err) = error {
-                    span.set_status(Status::error(err.to_string()));
-                    span.set_attribute(KeyValue::new(
-                        "error.type",
-                        err.get("code")
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "_OTHER".to_string()),
-                    ));
-                }
-                span.end();
             }
             "session/prompt" => {
                 if let Some(ref session_id) = pending.session_id {
@@ -369,32 +398,34 @@ impl SpanManager {
                 }
             }
             m if acp::is_fs_or_terminal_method(m) => {
-                let mut span = pending.span;
-                if self.record_content {
-                    if let Some(res) = result {
+                if let Some(mut span) = pending.span {
+                    if self.record_content {
+                        if let Some(res) = result {
+                            span.set_attribute(KeyValue::new(
+                                "gen_ai.tool.call.result",
+                                res.to_string(),
+                            ));
+                        }
+                    }
+                    if let Some(err) = error {
+                        span.set_status(Status::error(err.to_string()));
                         span.set_attribute(KeyValue::new(
-                            "gen_ai.tool.call.result",
-                            res.to_string(),
+                            "error.type",
+                            err.get("code")
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "_OTHER".to_string()),
                         ));
                     }
+                    span.end();
                 }
-                if let Some(err) = error {
-                    span.set_status(Status::error(err.to_string()));
-                    span.set_attribute(KeyValue::new(
-                        "error.type",
-                        err.get("code")
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "_OTHER".to_string()),
-                    ));
-                }
-                span.end();
             }
             _ => {
-                let mut span = pending.span;
-                if let Some(err) = error {
-                    span.set_status(Status::error(err.to_string()));
+                if let Some(mut span) = pending.span {
+                    if let Some(err) = error {
+                        span.set_status(Status::error(err.to_string()));
+                    }
+                    span.end();
                 }
-                span.end();
             }
         }
     }
@@ -405,6 +436,24 @@ impl SpanManager {
             .get(session_id)
             .and_then(|s| s.prompt_span_context.as_ref())
             .map(|sc| Context::new().with_remote_span_context(sc.clone()))
+    }
+
+    /// Get the root session context for parenting top-level spans.
+    fn root_context(&self) -> Option<Context> {
+        self.session_span_context
+            .as_ref()
+            .map(|sc| Context::new().with_remote_span_context(sc.clone()))
+    }
+
+    /// Start a span as a child of the root session span (or as root if none exists).
+    fn start_under_root(
+        &self,
+        builder: opentelemetry::trace::SpanBuilder,
+    ) -> opentelemetry::global::BoxedSpan {
+        match self.root_context() {
+            Some(cx) => builder.start_with_context(&self.tracer, &cx),
+            None => builder.start(&self.tracer),
+        }
     }
 
     fn handle_notification(&mut self, _direction: Direction, method: &str, params: &Value) {
@@ -515,9 +564,14 @@ impl SpanManager {
             }
         }
         for (_, pending) in self.pending.drain() {
-            let mut span = pending.span;
-            span.set_status(Status::error("process exited before response"));
-            span.end();
+            if let Some(mut span) = pending.span {
+                span.set_status(Status::error("process exited before response"));
+                span.end();
+            }
+        }
+        // End the root session span last
+        if let Some(mut root) = self.session_span.take() {
+            root.end();
         }
     }
 }

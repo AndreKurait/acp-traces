@@ -1,6 +1,6 @@
 use anyhow::Result;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider, Resource};
 
 pub fn init(
@@ -13,11 +13,12 @@ pub fn init(
         .build();
 
     let tracer_provider = match protocol {
-        "http" => {
-            let exporter = SpanExporter::builder()
-                .with_http()
-                .with_endpoint(endpoint)
-                .build()?;
+        "http" | "http-json" => {
+            let mut builder = SpanExporter::builder().with_http().with_endpoint(endpoint);
+            if protocol == "http-json" {
+                builder = builder.with_protocol(Protocol::HttpJson);
+            }
+            let exporter = builder.build()?;
             SdkTracerProvider::builder()
                 .with_resource(resource.clone())
                 .with_batch_exporter(exporter)
@@ -45,6 +46,9 @@ pub fn init(
 }
 
 pub fn shutdown(tracer_provider: SdkTracerProvider, meter_provider: SdkMeterProvider) {
+    if let Err(e) = tracer_provider.force_flush() {
+        tracing::warn!(error = %e, "tracer flush error");
+    }
     if let Err(e) = tracer_provider.shutdown() {
         tracing::warn!(error = %e, "tracer shutdown error");
     }

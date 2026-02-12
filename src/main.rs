@@ -121,21 +121,31 @@ async fn main() -> Result<()> {
     });
 
     // Process intercepted messages — owns span_mgr, no shared state
+    let tp_clone = tracer_provider.clone();
     let processor = tokio::spawn(async move {
         let mut mgr = span_mgr;
         while let Some((direction, line)) = rx.recv().await {
             mgr.process_message(direction, &line);
         }
         mgr.shutdown();
+        // Flush immediately so the root span is exported before process exit
+        let _ = tp_clone.force_flush();
     });
 
-    let status = child.wait().await?;
-    let _ = editor_to_agent.await;
-    let _ = agent_to_editor.await;
+    let status = tokio::select! {
+        s = child.wait() => s?,
+        _ = editor_to_agent => {
+            // stdin EOF — kill child so we can shut down cleanly
+            child.kill().await.ok();
+            child.wait().await?
+        }
+    };
+    // Abort the agent_to_editor task to drop its tx sender, closing the channel
+    agent_to_editor.abort();
     let _ = processor.await;
 
     telemetry::shutdown(tracer_provider, meter_provider);
 
     tracing::info!(code = ?status.code(), "agent exited");
-    std::process::exit(status.code().unwrap_or(1));
+    std::process::exit(status.code().unwrap_or(0));
 }
