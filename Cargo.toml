@@ -1,9 +1,17 @@
 [package]
 name = "acp-traces"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "OTel GenAI semconv-compliant tracing proxy for Agent Client Protocol"
 license = "Apache-2.0"
+
+[lib]
+name = "acp_traces"
+path = "src/lib.rs"
+
+[[bin]]
+name = "acp-traces"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

@@ -124,6 +124,17 @@ pub fn map_tool_kind_to_type(kind: &str) -> &'static str {
     }
 }
 
+/// Map ACP stopReason to OTel output message FinishReason.
+/// Schema enum: stop, length, content_filter, tool_call, error (custom strings allowed).
+pub fn map_stop_reason_to_finish_reason(stop_reason: &str) -> &str {
+    match stop_reason {
+        "end_turn" => "stop",
+        "max_tokens" | "max_turn_requests" => "length",
+        "refusal" => "content_filter",
+        _ => stop_reason, // pass through cancelled, etc.
+    }
+}
+
 pub fn is_fs_or_terminal_method(method: &str) -> bool {
     matches!(
         method,
@@ -227,5 +238,60 @@ mod tests {
         assert!(is_fs_or_terminal_method("fs/read_text_file"));
         assert!(is_fs_or_terminal_method("terminal/create"));
         assert!(!is_fs_or_terminal_method("session/prompt"));
+    }
+
+    #[test]
+    fn stop_reason_to_finish_reason_mapping() {
+        assert_eq!(map_stop_reason_to_finish_reason("end_turn"), "stop");
+        assert_eq!(map_stop_reason_to_finish_reason("max_tokens"), "length");
+        assert_eq!(
+            map_stop_reason_to_finish_reason("max_turn_requests"),
+            "length"
+        );
+        assert_eq!(
+            map_stop_reason_to_finish_reason("refusal"),
+            "content_filter"
+        );
+        assert_eq!(map_stop_reason_to_finish_reason("cancelled"), "cancelled");
+        assert_eq!(
+            map_stop_reason_to_finish_reason("unknown_value"),
+            "unknown_value"
+        );
+    }
+
+    #[test]
+    fn extract_stop_reason_from_result() {
+        let result: Value = serde_json::from_str(r#"{"stopReason":"end_turn"}"#).unwrap();
+        assert_eq!(extract_stop_reason(&result), Some("end_turn"));
+
+        let no_reason: Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(extract_stop_reason(&no_reason), None);
+    }
+
+    #[test]
+    fn parse_tool_call_notification() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Reading file","kind":"read"}}}"#;
+        match parse(line).unwrap() {
+            MessageType::Notification { params, .. } => {
+                assert_eq!(extract_update_type(&params), Some("tool_call"));
+                assert_eq!(extract_tool_call_id(&params), Some("tc1"));
+                assert_eq!(extract_tool_call_title(&params), Some("Reading file"));
+                assert_eq!(extract_tool_call_kind(&params), Some("read"));
+            }
+            _ => panic!("expected notification"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_update_notification() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc1","status":"completed"}}}"#;
+        match parse(line).unwrap() {
+            MessageType::Notification { params, .. } => {
+                assert_eq!(extract_update_type(&params), Some("tool_call_update"));
+                assert_eq!(extract_tool_call_id(&params), Some("tc1"));
+                assert_eq!(extract_tool_call_status(&params), Some("completed"));
+            }
+            _ => panic!("expected notification"),
+        }
     }
 }

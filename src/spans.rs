@@ -1,8 +1,8 @@
 use crate::acp::{self, Direction, MessageType};
 use opentelemetry::{
     metrics::{Histogram, Meter},
-    trace::{Span, SpanKind, Status, Tracer},
-    KeyValue,
+    trace::{Span, SpanContext, SpanKind, Status, TraceContextExt, Tracer},
+    Context, KeyValue,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 struct SessionState {
     prompt_span: Option<opentelemetry::global::BoxedSpan>,
+    prompt_span_context: Option<SpanContext>,
     prompt_start: Option<Instant>,
     first_chunk_time: Option<Instant>,
     accumulated_output: String,
@@ -164,11 +165,13 @@ impl SpanManager {
                     .with_kind(SpanKind::Client)
                     .with_attributes(attrs)
                     .start(&self.tracer);
+                let span_context = span.span_context().clone();
                 let now = Instant::now();
                 self.sessions
                     .entry(session_id.clone())
                     .or_insert_with(|| SessionState {
                         prompt_span: None,
+                        prompt_span_context: None,
                         prompt_start: None,
                         first_chunk_time: None,
                         accumulated_output: String::new(),
@@ -176,6 +179,7 @@ impl SpanManager {
                     });
                 let session = self.sessions.get_mut(&session_id).unwrap();
                 session.prompt_span = Some(span);
+                session.prompt_span_context = Some(span_context);
                 session.prompt_start = Some(now);
                 session.first_chunk_time = None;
                 session.accumulated_output.clear();
@@ -209,12 +213,18 @@ impl SpanManager {
                         params.to_string(),
                     ));
                 }
-                let span = self
+                let builder = self
                     .tracer
                     .span_builder(span_name)
                     .with_kind(SpanKind::Internal)
-                    .with_attributes(attrs)
-                    .start(&self.tracer);
+                    .with_attributes(attrs);
+                let span = match session_id
+                    .as_deref()
+                    .and_then(|sid| self.parent_context_for_session(sid))
+                {
+                    Some(cx) => builder.start_with_context(&self.tracer, &cx),
+                    None => builder.start(&self.tracer),
+                };
                 self.pending.insert(
                     id.to_string(),
                     PendingRequest {
@@ -298,9 +308,26 @@ impl SpanManager {
                                         "gen_ai.response.finish_reasons",
                                         format!("[\"{reason}\"]"),
                                     ));
+                                    if self.record_content && !session.accumulated_output.is_empty()
+                                    {
+                                        let finish = acp::map_stop_reason_to_finish_reason(reason);
+                                        let output_msg = serde_json::json!([{
+                                            "role": "assistant",
+                                            "parts": [{"type": "text", "content": &session.accumulated_output}],
+                                            "finish_reason": finish
+                                        }]);
+                                        span.set_attribute(KeyValue::new(
+                                            "gen_ai.output.messages",
+                                            output_msg.to_string(),
+                                        ));
+                                    }
                                 }
                             }
-                            if self.record_content && !session.accumulated_output.is_empty() {
+                            if self.record_content
+                                && !session.accumulated_output.is_empty()
+                                && result.and_then(|r| acp::extract_stop_reason(r)).is_none()
+                            {
+                                // No stop reason available — emit without finish_reason
                                 let output_msg = serde_json::json!([{
                                     "role": "assistant",
                                     "parts": [{"type": "text", "content": &session.accumulated_output}]
@@ -372,6 +399,14 @@ impl SpanManager {
         }
     }
 
+    /// Get a parent Context for creating child spans under the active prompt span.
+    fn parent_context_for_session(&self, session_id: &str) -> Option<Context> {
+        self.sessions
+            .get(session_id)
+            .and_then(|s| s.prompt_span_context.as_ref())
+            .map(|sc| Context::new().with_remote_span_context(sc.clone()))
+    }
+
     fn handle_notification(&mut self, _direction: Direction, method: &str, params: &Value) {
         if method != "session/update" {
             return;
@@ -422,12 +457,15 @@ impl SpanManager {
                         attrs.push(KeyValue::new("gen_ai.tool.call.arguments", raw.to_string()));
                     }
                 }
-                let span = self
+                let builder = self
                     .tracer
                     .span_builder(span_name)
                     .with_kind(SpanKind::Internal)
-                    .with_attributes(attrs)
-                    .start(&self.tracer);
+                    .with_attributes(attrs);
+                let span = match self.parent_context_for_session(&session_id) {
+                    Some(cx) => builder.start_with_context(&self.tracer, &cx),
+                    None => builder.start(&self.tracer),
+                };
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.tool_spans.insert(tool_call_id, span);
                 }
