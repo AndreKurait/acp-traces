@@ -4,6 +4,10 @@ version = "0.3.0"
 edition = "2021"
 description = "OTel GenAI semconv-compliant tracing proxy for Agent Client Protocol"
 license = "Apache-2.0"
+repository = "https://github.com/AndreKurait/acp-traces"
+homepage = "https://github.com/AndreKurait/acp-traces"
+keywords = ["acp", "opentelemetry", "tracing", "agent", "observability", "otlp"]
+categories = ["development-tools", "observability"]
 
 [lib]
 name = "acp_traces"

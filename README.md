@@ -1,6 +1,9 @@
 # acp-traces
 
-Add OpenTelemetry tracing to any [Agent Client Protocol](https://agentclientprotocol.com) agent with zero code changes. One binary, one line in your editor config.
+[![CI](https://github.com/AndreKurait/acp-traces/actions/workflows/ci.yml/badge.svg)](https://github.com/AndreKurait/acp-traces/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+**Add OpenTelemetry tracing to any [Agent Client Protocol](https://agentclientprotocol.com) agent with zero code changes.** One binary, one line in your editor config.
 
 `acp-traces` sits between your editor (Zed, JetBrains) and your AI agent (Kiro, Claude Code, Gemini CLI), intercepting the ACP JSON-RPC messages and emitting [OTel GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) traces to any OTLP-compatible backend.
 
@@ -121,42 +124,10 @@ ACP-specific extensions use the `acp.*` namespace:
 
 ## Contributing
 
-### Build from source
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run checks, and submit changes. By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
 
-```bash
-git clone https://github.com/AndreKurait/acp-traces.git
-cd acp-traces
-cargo build --release
-# Binary at target/release/acp-traces
-```
-
-### Run checks
-
-```bash
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-```
-
-### Release process
-
-Push a semver tag to trigger the release workflow:
-
-```bash
-git tag -a v0.2.0 -m "Description"
-git push origin v0.2.0
-```
-
-This builds binaries for all platforms, creates a GitHub Release, and auto-updates the Homebrew formula.
-
-### Architecture
-
-- `src/main.rs` — CLI, child process spawning, bidirectional stdio pipe
-- `src/acp.rs` — JSON-RPC message parser and ACP data extractor
-- `src/spans.rs` — OTel span manager, session state machine, GenAI semconv mapping
-- `src/telemetry.rs` — OTLP exporter setup (gRPC + HTTP)
-- `DESIGN.md` — Full design document with spec mappings and open questions
+**Architecture (quick reference):** `src/main.rs` (CLI, stdio proxy) · `src/acp.rs` (JSON-RPC/ACP parsing) · `src/spans.rs` (OTel spans, GenAI semconv) · `src/telemetry.rs` (OTLP export) · [DESIGN.md](DESIGN.md) (full design)
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).
