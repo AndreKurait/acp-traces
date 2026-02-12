@@ -53,7 +53,7 @@ jobs:
           src="target/${{ matrix.target }}/release/acp-traces"
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then src="${src}.exe"; fi
           cp "$src" "${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
