@@ -35,7 +35,7 @@ pub struct SpanManager {
     client_version: Option<String>,
     protocol_version: Option<i64>,
     sessions: HashMap<String, SessionState>,
-    pending: HashMap<String, PendingRequest>,
+    pending: HashMap<(Direction, String), PendingRequest>,
     /// Root span for the entire ACP session — parents all other spans.
     session_span: Option<opentelemetry::global::BoxedSpan>,
     session_span_context: Option<SpanContext>,
@@ -86,7 +86,7 @@ impl SpanManager {
                 self.handle_request(direction, id, &method, &params);
             }
             MessageType::Response { id, result, error } => {
-                self.handle_response(id, result.as_ref(), error.as_ref());
+                self.handle_response(direction, id, result.as_ref(), error.as_ref());
             }
             MessageType::Notification { method, params } => {
                 self.handle_notification(direction, &method, &params);
@@ -129,7 +129,7 @@ impl SpanManager {
                         ]),
                 );
                 self.pending.insert(
-                    id.to_string(),
+                    (direction, id.to_string()),
                     PendingRequest {
                         span: Some(span),
                         method: method.to_string(),
@@ -203,7 +203,7 @@ impl SpanManager {
                 session.first_chunk_time = None;
                 session.accumulated_output.clear();
                 self.pending.insert(
-                    id.to_string(),
+                    (direction, id.to_string()),
                     PendingRequest {
                         span: None,
                         method: method.to_string(),
@@ -245,7 +245,7 @@ impl SpanManager {
                     None => builder.start(&self.tracer),
                 };
                 self.pending.insert(
-                    id.to_string(),
+                    (direction, id.to_string()),
                     PendingRequest {
                         span: Some(span),
                         method: m.to_string(),
@@ -269,7 +269,7 @@ impl SpanManager {
                         ]),
                 );
                 self.pending.insert(
-                    id.to_string(),
+                    (direction, id.to_string()),
                     PendingRequest {
                         span: Some(span),
                         method: method.to_string(),
@@ -281,8 +281,15 @@ impl SpanManager {
         }
     }
 
-    fn handle_response(&mut self, id: Value, result: Option<&Value>, error: Option<&Value>) {
-        let key = id.to_string();
+    fn handle_response(
+        &mut self,
+        direction: Direction,
+        id: Value,
+        result: Option<&Value>,
+        error: Option<&Value>,
+    ) {
+        // Each peer owns its request-ID namespace; responses travel in the opposite direction.
+        let key = (direction.opposite(), id.to_string());
         let pending = match self.pending.remove(&key) {
             Some(p) => p,
             None => return,
@@ -309,13 +316,8 @@ impl SpanManager {
                         }
                     }
                     if let Some(err) = error {
-                        span.set_status(Status::error(err.to_string()));
-                        span.set_attribute(KeyValue::new(
-                            "error.type",
-                            err.get("code")
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "_OTHER".to_string()),
-                        ));
+                        span.set_status(Status::error(error_description(err, self.record_content)));
+                        span.set_attribute(KeyValue::new("error.type", error_type(err)));
                     }
                     // Update root session span with agent info
                     if let Some(ref name) = self.agent_name {
@@ -335,7 +337,9 @@ impl SpanManager {
                                 if let Some(reason) = acp::extract_stop_reason(res) {
                                     span.set_attribute(KeyValue::new(
                                         "gen_ai.response.finish_reasons",
-                                        format!("[\"{reason}\"]"),
+                                        opentelemetry::Value::Array(opentelemetry::Array::String(
+                                            vec![reason.to_string().into()],
+                                        )),
                                     ));
                                     if self.record_content && !session.accumulated_output.is_empty()
                                     {
@@ -380,15 +384,15 @@ impl SpanManager {
                                 }
                             }
                             if let Some(err) = error {
-                                span.set_status(Status::error(err.to_string()));
-                                span.set_attribute(KeyValue::new(
-                                    "error.type",
-                                    err.get("code")
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "_OTHER".to_string()),
-                                ));
+                                span.set_status(Status::error(error_description(
+                                    err,
+                                    self.record_content,
+                                )));
+                                span.set_attribute(KeyValue::new("error.type", error_type(err)));
                             }
                             span.end();
+                            session.prompt_span_context = None;
+                            session.accumulated_output.clear();
                             self.duration_histogram.record(
                                 duration,
                                 &[KeyValue::new("gen_ai.operation.name", "invoke_agent")],
@@ -408,13 +412,8 @@ impl SpanManager {
                         }
                     }
                     if let Some(err) = error {
-                        span.set_status(Status::error(err.to_string()));
-                        span.set_attribute(KeyValue::new(
-                            "error.type",
-                            err.get("code")
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "_OTHER".to_string()),
-                        ));
+                        span.set_status(Status::error(error_description(err, self.record_content)));
+                        span.set_attribute(KeyValue::new("error.type", error_type(err)));
                     }
                     span.end();
                 }
@@ -422,7 +421,8 @@ impl SpanManager {
             _ => {
                 if let Some(mut span) = pending.span {
                     if let Some(err) = error {
-                        span.set_status(Status::error(err.to_string()));
+                        span.set_status(Status::error(error_description(err, self.record_content)));
+                        span.set_attribute(KeyValue::new("error.type", error_type(err)));
                     }
                     span.end();
                 }
@@ -478,8 +478,10 @@ impl SpanManager {
                     if session.first_chunk_time.is_none() {
                         session.first_chunk_time = Some(Instant::now());
                     }
-                    if let Some(text) = acp::extract_chunk_text(params) {
-                        session.accumulated_output.push_str(text);
+                    if self.record_content {
+                        if let Some(text) = acp::extract_chunk_text(params) {
+                            session.accumulated_output.push_str(text);
+                        }
                     }
                 }
             }
@@ -574,4 +576,22 @@ impl SpanManager {
             root.end();
         }
     }
+}
+
+fn error_description(error: &Value, record_content: bool) -> String {
+    if record_content {
+        error.to_string()
+    } else if let Some(code) = error.get("code").and_then(Value::as_i64) {
+        format!("JSON-RPC error {code}")
+    } else {
+        "JSON-RPC error".to_string()
+    }
+}
+
+fn error_type(error: &Value) -> String {
+    error
+        .get("code")
+        .and_then(Value::as_i64)
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "_OTHER".to_string())
 }

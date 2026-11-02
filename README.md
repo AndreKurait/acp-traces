@@ -3,33 +3,49 @@
 [![CI](https://github.com/AndreKurait/acp-traces/actions/workflows/ci.yml/badge.svg)](https://github.com/AndreKurait/acp-traces/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Add OpenTelemetry tracing to any [Agent Client Protocol](https://agentclientprotocol.com) agent with zero code changes.** One binary, one line in your editor config.
+**Proof of concept: OpenTelemetry tracing for Agent Client Protocol (ACP) over stdio.**
 
-`acp-traces` sits between your editor (Zed, JetBrains) and your AI agent (Kiro, Claude Code, Gemini CLI), intercepting the ACP JSON-RPC messages and emitting [OTel GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) traces to any OTLP-compatible backend.
+`acp-traces` launches an agent, forwards newline-delimited JSON-RPC between the agent and its client, and observes supported messages to produce traces and metrics. It does not modify the agent or inject fields into the protocol.
 
-```
-Editor ──stdin──▶ [acp-traces] ──stdin──▶ Agent
-Editor ◀──stdout── [acp-traces] ◀──stdout── Agent
+This is an experimental project, not a production-ready monitoring agent. Client compatibility and semantic-convention coverage are incomplete. This README describes `main`; installed releases may not include the [unreleased fixes](CHANGELOG.md).
+
+```text
+Client ──stdin──▶ acp-traces ──stdin──▶ Agent
+Client ◀──stdout── acp-traces ◀──stdout── Agent
                        │
-                       └──▶ OTLP ──▶ Jaeger / Phoenix / Opik / Grafana Tempo
+                       └── OTLP traces + metrics ──▶ Collector/backend
 ```
 
-## Quick Start
+## Getting started
+
+You need an ACP agent that communicates over stdio and an OTLP receiver. The proxy does not provide either one.
 
 ### Install
 
-```bash
-# macOS / Linux
-brew tap AndreKurait/tap
-brew install acp-traces
+Published binaries are available through Homebrew or [GitHub Releases](https://github.com/AndreKurait/acp-traces/releases):
 
-# Or download from GitHub Releases
-# https://github.com/AndreKurait/acp-traces/releases
+```bash
+brew install AndreKurait/tap/acp-traces
+acp-traces --version
 ```
 
-### Configure Zed
+To try the current development code with a stable Rust toolchain:
 
-Add to your Zed `settings.json`:
+```bash
+git clone https://github.com/AndreKurait/acp-traces.git
+cd acp-traces
+cargo install --path . --locked
+```
+
+### Run an agent
+
+Pass the agent command after `--`. For example, if `kiro-cli acp` is available locally:
+
+```bash
+acp-traces --otlp-endpoint http://localhost:4317 -- kiro-cli acp
+```
+
+Configure your ACP client to launch the proxy in place of the agent. A Zed custom-agent configuration can look like this; adapt it to your client's supported configuration and your agent's arguments:
 
 ```json
 {
@@ -44,89 +60,68 @@ Add to your Zed `settings.json`:
 }
 ```
 
-That's it. Start a Jaeger instance (`docker run -d -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one`) and open http://localhost:16686 to see your traces.
+For an OTLP/HTTP receiver:
 
-### Use with Opik (HTTP)
-
-```json
-"args": ["--otlp-endpoint", "http://localhost:4318", "--otlp-protocol", "http", "--", "kiro-cli", "acp"]
+```bash
+acp-traces --otlp-protocol http --otlp-endpoint http://localhost:4318 -- kiro-cli acp
 ```
 
-## What Gets Traced
+HTTP exports use `/v1/traces` and `/v1/metrics` beneath the supplied base URL, preserving any path prefix and query parameters. `http-json` selects JSON encoding; `http` selects protobuf. An explicit `/v1/traces` endpoint is also accepted for compatibility with earlier configurations. Standard OTLP environment variables supported by the Rust exporter can override endpoint/header settings.
 
-Every ACP interaction becomes an OTel span:
+TLS exporter features are not enabled in this build. Use a local collector to forward telemetry to a remote TLS/authenticated backend.
 
-| ACP Event | Span | What you see |
-|---|---|---|
-| `session/prompt` → response | `invoke_agent` | Full prompt turn: duration, TTFT, stop reason |
-| Tool calls (read, edit, search, execute…) | `execute_tool` | Each tool: name, kind, duration, arguments, result |
-| `fs/read_text_file`, `fs/write_text_file` | `execute_tool` | File I/O the agent requests from the editor |
-| `terminal/create`, `terminal/write` | `execute_tool` | Terminal commands the agent runs |
-| `initialize`, `session/new` | Protocol spans | Connection setup, capability negotiation |
+## What it records
 
-### Timing
-
-All timing is captured implicitly from the message flow — no agent cooperation needed:
-
-- **Total turn time** — how long the agent takes to respond
-- **Time to first token** — when the first streaming chunk arrives
-- **Tool execution time** — per-tool duration
-- **Human approval latency** — how long permission requests take
-
-### Metrics
-
-| Metric | Description |
+| Observed traffic | Telemetry |
 |---|---|
-| `gen_ai.client.operation.duration` | Histogram of agent turn durations |
-| `gen_ai.server.time_to_first_token` | Histogram of time to first response chunk |
+| `initialize` | Protocol span, agent/client metadata, root connection span |
+| `session/prompt` and its response | `invoke_agent` span, duration, stop reason |
+| `agent_message_chunk` | Time to first observed message chunk |
+| Tool-call notifications | `execute_tool` spans with tool title/kind and completion status |
+| Supported filesystem/terminal requests | Tool spans correlated with their responses |
+| Other JSON-RPC requests | Method spans with response/error status |
 
-## CLI Reference
+Two histograms are exported: `gen_ai.client.operation.duration` and `gen_ai.server.time_to_first_token`, both in seconds. The latter measures the first observed ACP message chunk, not model inference time. Metrics export periodically and at shutdown; `OTEL_METRIC_EXPORT_INTERVAL` controls the periodic interval in milliseconds.
 
-```
+Attributes use OpenTelemetry's evolving GenAI conventions plus `acp.*` metadata. This is a practical mapping, not a claim of full semantic-convention conformance. See [DESIGN.md](DESIGN.md) for the implemented behavior and limitations.
+
+## Privacy
+
+Content recording is **off by default**. Prompts, response text, tool arguments/results, and JSON-RPC error payloads are omitted from exported spans unless `--record-content` is enabled. Default error statuses retain the numeric error code.
+
+Metadata is still exported: session IDs, agent/client names and versions, method names, tool titles/kinds, timestamps, and error codes. Tool titles may contain paths or other sensitive information. Default mode is not anonymization. Child stderr passes through unchanged, and the proxy's logs go to stderr.
+
+`--record-content` can export source code, credentials, file contents, and other private data to your configured receiver. Use a receiver you trust and inspect its retention/access settings. The proxy does not redact secrets from opted-in content. See [SECURITY.md](SECURITY.md).
+
+## CLI
+
+```text
 acp-traces [OPTIONS] -- <command> [args...]
 ```
 
-| Option | Default | Description |
+| Option | Default | Purpose |
 |---|---|---|
-| `--otlp-endpoint <URL>` | `http://localhost:4317` | OTLP endpoint |
-| `--otlp-protocol <PROTO>` | `grpc` | `grpc` or `http` |
-| `--service-name <NAME>` | `acp-agent` | OTel `service.name` resource attribute |
-| `--record-content` | off | Record `gen_ai.input/output.messages` (contains sensitive data) |
-| `-v, --verbose` | warn | Log verbosity to stderr (repeat: `-vv`, `-vvv`) |
+| `--otlp-endpoint <URL>` | `http://localhost:4317` | OTLP receiver; use port 4318 for a typical HTTP receiver |
+| `--otlp-protocol <PROTO>` | `grpc` | `grpc`, `http`, or `http-json` |
+| `--service-name <NAME>` | `acp-agent` | `service.name` resource attribute |
+| `--record-content` | off | Include content and detailed error payloads |
+| `-v`, `-vv`, `-vvv` | warnings | Increase proxy logging to stderr |
 
-## Semantic Conventions
+## Behavior and limitations
 
-Traces follow [OTel GenAI Semantic Conventions v1.39](https://opentelemetry.io/docs/specs/semconv/gen-ai/), the same standard used by OpenAI, Bedrock, and MCP instrumentations.
-
-Key attributes on every span:
-
-| Attribute | Example |
-|---|---|
-| `gen_ai.operation.name` | `invoke_agent`, `execute_tool` |
-| `gen_ai.agent.name` | `kiro` |
-| `gen_ai.provider.name` | `acp.kiro` |
-| `gen_ai.conversation.id` | ACP session ID |
-| `gen_ai.tool.name` | `Reading configuration file` |
-| `gen_ai.tool.type` | `extension`, `datastore`, `function` |
-| `gen_ai.response.finish_reasons` | `["end_turn"]` |
-| `network.transport` | `pipe` |
-
-ACP-specific extensions use the `acp.*` namespace:
-
-| Attribute | Description |
-|---|---|
-| `acp.tool.kind` | Original ACP tool kind (`read`, `edit`, `think`, `search`…) |
-| `acp.client.name` | IDE identity (e.g. `zed`) |
-| `acp.agent.version` | Agent version |
-| `acp.time_to_first_token_ms` | TTFT per invocation |
-
----
+- Bytes and line endings are forwarded unchanged, including messages the observer cannot parse. Stdout is reserved for agent traffic.
+- Closing client stdin closes agent stdin and gives the agent five seconds to exit before terminating it. Final stdout is drained before telemetry shutdown. The agent's exit code is preserved; on Unix, signal exits use `128 + signal`.
+- Telemetry observation uses a bounded message queue. Under load it can apply backpressure. Individual message sizes, opted-in output accumulation, and retained session state are not capped; avoid untrusted or unbounded streams.
+- The observer expects newline-delimited JSON-RPC. It does not support Content-Length framing, inject distributed trace context, or forward process-group signals.
+- Tool notifications are associated with the active prompt. The implementation assumes at most one active prompt per session and does not reconstruct arbitrary out-of-order histories.
+- Content capture covers text prompt blocks and observed tool payloads; it does not reconstruct every resource/image/audio block.
+- Unit/integration tests exercise protocol correlation, privacy defaults, process shutdown, and OTLP/HTTP export. They are not an exhaustive editor/agent/backend compatibility matrix.
 
 ## Contributing
 
-We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run checks, and submit changes. By participating, you agree to our [Code of Conduct](CODE_OF_CONDUCT.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Useful contributions include minimized ACP fixtures, compatibility reports, resource bounds, and tests for cancellation and abnormal process exits. Read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
-**Architecture (quick reference):** `src/main.rs` (CLI, stdio proxy) · `src/acp.rs` (JSON-RPC/ACP parsing) · `src/spans.rs` (OTel spans, GenAI semconv) · `src/telemetry.rs` (OTLP export) · [DESIGN.md](DESIGN.md) (full design)
+**Code map:** `src/main.rs` forwards stdio and manages the child; `src/acp.rs` parses messages; `src/spans.rs` correlates requests and constructs spans; `src/telemetry.rs` configures exporters.
 
 ## License
 

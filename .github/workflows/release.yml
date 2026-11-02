@@ -5,13 +5,34 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check release tag matches package version
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          with open("Cargo.toml", "rb") as source:
+              version = tomllib.load(source)["package"]["version"]
+          expected = f"v{version}"
+          actual = os.environ["GITHUB_REF_NAME"]
+          if actual != expected:
+              raise SystemExit(f"Tag {actual!r} does not match Cargo.toml ({expected!r})")
+          PY
+      - run: cargo test --locked --all-targets
+
   build:
+    needs: validate
     strategy:
       matrix:
         include:
@@ -34,6 +55,9 @@ jobs:
             target: aarch64-pc-windows-msvc
             artifact: acp-traces-windows-arm64.exe
     runs-on: ${{ matrix.os }}
+    env:
+      BUILD_TARGET: ${{ matrix.target }}
+      ARTIFACT_NAME: ${{ matrix.artifact }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,14 +69,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-      - run: cargo build --release --target ${{ matrix.target }}
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --locked --release --target "$BUILD_TARGET"
+        shell: bash
       - name: Copy binary
         shell: bash
         run: |
-          src="target/${{ matrix.target }}/release/acp-traces"
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then src="${src}.exe"; fi
-          cp "$src" "${{ matrix.artifact }}"
+          src="target/${BUILD_TARGET}/release/acp-traces"
+          if [[ "$BUILD_TARGET" == *"windows"* ]]; then src="${src}.exe"; fi
+          cp "$src" "$ARTIFACT_NAME"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -61,14 +86,19 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      - name: Generate binary checksums
+        run: sha256sum acp-traces-* > SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             acp-traces-linux-amd64
             acp-traces-linux-arm64
@@ -76,6 +106,7 @@ jobs:
             acp-traces-macos-amd64
             acp-traces-windows-amd64.exe
             acp-traces-windows-arm64.exe
+            SHA256SUMS
 
   update-homebrew:
     needs: release
@@ -133,10 +164,16 @@ jobs:
           end
           EOF
 
-          git clone https://x-access-token:${GH_TOKEN}@github.com/AndreKurait/homebrew-tap.git tap
+          gh auth setup-git
+          gh repo clone AndreKurait/homebrew-tap tap
           cp formula.rb tap/Formula/acp-traces.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/acp-traces.rb
-          git diff --cached --quiet && echo "No changes" || (git commit -m "Update acp-traces to ${VERSION}" && git push)
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Update acp-traces to ${VERSION}"
+            git push
+          fi

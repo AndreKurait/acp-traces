@@ -1,33 +1,25 @@
-# Security
+# Security and privacy
+
+`acp-traces` is an experimental proof of concept. It runs an agent with the current user's permissions and observes that agent's stdio traffic. It is not a sandbox, a secret-redaction tool, or a production security boundary.
+
+## Data handling
+
+- Content recording is off by default. The proxy still exports session IDs, method names, agent/client metadata, tool titles, timestamps, and numeric error codes. Tool titles can contain sensitive paths or names.
+- `--record-content` enables prompt/response text, tool payloads, and detailed error JSON. These can contain credentials or private source code. They are sent to the configured OTLP receiver without automatic secret redaction.
+- The proxy inherits the agent's stderr. Do not assume stderr logs are sanitized.
+- The default endpoint is unencrypted and local. TLS exporter features are not enabled in this build; use a trusted local collector to forward telemetry to a remote TLS/authenticated backend.
+- Message size, opted-in content accumulation, and retained session state are not capped. Do not expose the proxy to untrusted or unbounded input streams.
+
+See [README.md](README.md) for configuration and [DESIGN.md](DESIGN.md) for implementation limits.
 
 ## Reporting a vulnerability
 
-If you believe you've found a security vulnerability in acp-traces, please report it responsibly.
+Do not put credentials, private traces, or an unpatched security issue in a public issue. Email [andrekurait@gmail.com](mailto:andrekurait@gmail.com) with:
 
-**Do not** open a public GitHub issue for security-sensitive bugs.
+- A description of the issue and affected version/commit.
+- A sanitized reproduction and the expected versus observed behavior.
+- The potential impact and any suggested mitigation.
 
-**Instead:**
+A private draft can also be used if GitHub's [Report a vulnerability](https://github.com/AndreKurait/acp-traces/security/advisories/new) option is available. Please agree on disclosure timing before publishing sensitive details.
 
-1. **Email** the maintainers (preferred): you can reach the project owner via the email listed in the commit history or on their GitHub profile.
-2. **Private security advisory** on GitHub: go to [Security → Advisories](https://github.com/AndreKurait/acp-traces/security/advisories) and click **Report a vulnerability** to create a private draft. This keeps the discussion confidential until a fix is ready.
-
-Include:
-
-- A short description of the issue
-- Steps to reproduce
-- Impact (e.g., data exposure, denial of service)
-- Suggested fix if you have one (optional)
-
-We will acknowledge receipt and aim to respond with an initial assessment within a few days. We may ask for more details. Once a fix is released, we can coordinate on disclosure timing (e.g., release notes, CVE) and credit you if you wish.
-
-## Supported versions
-
-We generally support the latest release with security fixes. If you need a patch for an older version, say so in your report.
-
-## Security update process
-
-- Fixes are developed in private and merged when ready.
-- A new patch release is published (e.g., 0.3.1).
-- Release notes and/or a security advisory will describe the issue and the fix after users have had time to upgrade.
-
-Thank you for helping keep acp-traces and its users safe.
+There is no guaranteed response SLA or long-term support branch. Fixes will target current development and, when appropriate, a new release. Older releases may require upgrading. This project does not promise production suitability merely because no vulnerability has been reported.

@@ -1,22 +1,13 @@
-use opentelemetry::trace::{Span, SpanKind, TraceContextExt, Tracer, TracerProvider};
-use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData};
+use acp_traces::{acp::Direction, spans::SpanManager};
+use opentelemetry::{global::BoxedTracer, metrics::MeterProvider, trace::TracerProvider};
+use opentelemetry_sdk::{
+    metrics::SdkMeterProvider,
+    trace::{SdkTracerProvider, SpanData},
+};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug)]
-struct TestExporter {
-    spans: Arc<Mutex<Vec<SpanData>>>,
-}
-
-impl TestExporter {
-    fn new() -> Self {
-        Self {
-            spans: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-    fn spans(&self) -> Vec<SpanData> {
-        self.spans.lock().unwrap().clone()
-    }
-}
+#[derive(Clone, Debug, Default)]
+struct TestExporter(Arc<Mutex<Vec<SpanData>>>);
 
 impl opentelemetry_sdk::trace::SpanExporter for TestExporter {
     fn export(
@@ -25,87 +16,151 @@ impl opentelemetry_sdk::trace::SpanExporter for TestExporter {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send>,
     > {
-        self.spans.lock().unwrap().extend(batch);
+        self.0.lock().unwrap().extend(batch);
         Box::pin(std::future::ready(Ok(())))
     }
 }
 
-fn setup() -> (SdkTracerProvider, TestExporter) {
-    let exporter = TestExporter::new();
+fn setup(record_content: bool) -> (SpanManager, TestExporter, SdkTracerProvider) {
+    let exporter = TestExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    (provider, exporter)
+    let tracer = BoxedTracer::new(Box::new(provider.tracer("test")));
+    let meter = SdkMeterProvider::default().meter("test");
+    (
+        SpanManager::new(tracer, meter, record_content),
+        exporter,
+        provider,
+    )
 }
 
 #[test]
-fn child_span_shares_trace_id_with_parent_via_remote_context() {
-    let (provider, exporter) = setup();
-    let tracer = provider.tracer("test");
-
-    let parent = tracer
-        .span_builder("invoke_agent")
-        .with_kind(SpanKind::Client)
-        .start(&tracer);
-    let parent_sc = parent.span_context().clone();
-    let parent_trace_id = parent_sc.trace_id();
-    let parent_span_id = parent_sc.span_id();
-
-    // Same technique used in our span hierarchy fix
-    let parent_cx = opentelemetry::Context::new().with_remote_span_context(parent_sc);
-    let child = tracer
-        .span_builder("execute_tool")
-        .with_kind(SpanKind::Internal)
-        .start_with_context(&tracer, &parent_cx);
-    let child_trace_id = child.span_context().trace_id();
-
-    assert_eq!(
-        parent_trace_id, child_trace_id,
-        "child must share parent trace ID"
+fn bidirectional_requests_with_the_same_id_complete_independently() {
+    let (mut mgr, exporter, _provider) = setup(false);
+    mgr.process_message(
+        Direction::EditorToAgent,
+        r#"{"id":1,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#,
     );
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":1,"method":"fs/read_text_file","params":{"sessionId":"s1","path":"/test"}}"#,
+    );
+    mgr.process_message(
+        Direction::EditorToAgent,
+        r#"{"id":1,"result":{"content":"data"}}"#,
+    );
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":1,"result":{"stopReason":"end_turn"}}"#,
+    );
+    mgr.shutdown();
 
-    drop(child);
-    drop(parent);
-    let _ = provider.force_flush();
-
-    let spans = exporter.spans();
+    let spans = exporter.0.lock().unwrap();
     assert_eq!(spans.len(), 2);
-    let child_data = spans.iter().find(|s| s.name == "execute_tool").unwrap();
+    assert!(spans
+        .iter()
+        .all(|s| s.status == opentelemetry::trace::Status::Unset));
+    let prompt = spans.iter().find(|s| s.name == "invoke_agent").unwrap();
+    let tool = spans
+        .iter()
+        .find(|s| s.name == "execute_tool fs/read_text_file")
+        .unwrap();
+    assert_eq!(tool.parent_span_id, prompt.span_context.span_id());
+    assert_eq!(tool.span_context.trace_id(), prompt.span_context.trace_id());
+}
+
+#[test]
+fn default_mode_omits_content_and_error_payloads() {
+    let (mut mgr, exporter, _provider) = setup(false);
+    mgr.process_message(Direction::EditorToAgent,
+        r#"{"id":1,"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"secret prompt"}]}}"#);
+    mgr.process_message(Direction::AgentToEditor,
+        r#"{"method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"secret output"}}}}"#);
+    mgr.process_message(Direction::AgentToEditor,
+        r#"{"id":2,"method":"fs/write_text_file","params":{"sessionId":"s1","content":"secret file"}}"#);
+    mgr.process_message(Direction::EditorToAgent,
+        r#"{"id":2,"error":{"code":-32602,"message":"secret file error","data":{"token":"secret token"}}}"#);
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":1,"error":{"code":-32603,"message":"secret prompt error"}}"#,
+    );
+    mgr.shutdown();
+
+    let spans = exporter.0.lock().unwrap();
+    assert_eq!(spans.len(), 2);
+    let exported = format!("{spans:?}");
+    assert!(
+        !exported.contains("secret"),
+        "content leaked into exported spans: {exported}"
+    );
+    assert!(exported.contains("JSON-RPC error -32602"));
+    assert!(exported.contains("JSON-RPC error -32603"));
+}
+
+#[test]
+fn record_content_is_an_explicit_opt_in() {
+    let (mut mgr, exporter, _provider) = setup(true);
+    mgr.process_message(Direction::EditorToAgent,
+        r#"{"id":1,"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"test prompt"}]}}"#);
+    mgr.process_message(Direction::AgentToEditor,
+        r#"{"method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"test output"}}}}"#);
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":1,"result":{"stopReason":"end_turn"}}"#,
+    );
+    mgr.shutdown();
+
+    let spans = exporter.0.lock().unwrap();
+    let prompt = spans.iter().find(|s| s.name == "invoke_agent").unwrap();
+    let attribute = |name: &str| {
+        prompt
+            .attributes
+            .iter()
+            .find(|a| a.key.as_str() == name)
+            .unwrap()
+            .value
+            .to_string()
+    };
+    let input: serde_json::Value =
+        serde_json::from_str(&attribute("gen_ai.input.messages")).unwrap();
+    let output: serde_json::Value =
+        serde_json::from_str(&attribute("gen_ai.output.messages")).unwrap();
+    assert_eq!(input[0]["parts"][0]["content"], "test prompt");
+    assert_eq!(output[0]["parts"][0]["content"], "test output");
+    assert_eq!(output[0]["finish_reason"], "stop");
+    let reasons = prompt
+        .attributes
+        .iter()
+        .find(|a| a.key.as_str() == "gen_ai.response.finish_reasons")
+        .unwrap();
     assert_eq!(
-        child_data.parent_span_id, parent_span_id,
-        "child parent_span_id must match"
+        reasons.value,
+        opentelemetry::Value::Array(opentelemetry::Array::String(vec!["end_turn".into()]))
     );
 }
 
 #[test]
-fn output_message_includes_finish_reason() {
-    use acp_traces::acp::map_stop_reason_to_finish_reason;
-
-    let finish = map_stop_reason_to_finish_reason("end_turn");
-    let output_msg = serde_json::json!([{
-        "role": "assistant",
-        "parts": [{"type": "text", "content": "Hello"}],
-        "finish_reason": finish
-    }]);
-
-    let msg = &output_msg[0];
-    assert_eq!(msg["role"], "assistant");
-    assert_eq!(msg["finish_reason"], "stop");
-    assert_eq!(msg["parts"][0]["type"], "text");
-}
-
-#[test]
-fn finish_reason_mappings() {
-    use acp_traces::acp::map_stop_reason_to_finish_reason;
-    assert_eq!(map_stop_reason_to_finish_reason("end_turn"), "stop");
-    assert_eq!(map_stop_reason_to_finish_reason("max_tokens"), "length");
-    assert_eq!(
-        map_stop_reason_to_finish_reason("max_turn_requests"),
-        "length"
+fn tools_after_a_completed_prompt_do_not_inherit_its_span() {
+    let (mut mgr, exporter, _provider) = setup(false);
+    mgr.process_message(
+        Direction::EditorToAgent,
+        r#"{"id":1,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#,
     );
-    assert_eq!(
-        map_stop_reason_to_finish_reason("refusal"),
-        "content_filter"
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":1,"result":{"stopReason":"end_turn"}}"#,
     );
-    assert_eq!(map_stop_reason_to_finish_reason("cancelled"), "cancelled");
+    mgr.process_message(
+        Direction::AgentToEditor,
+        r#"{"id":2,"method":"fs/read_text_file","params":{"sessionId":"s1"}}"#,
+    );
+    mgr.process_message(Direction::EditorToAgent, r#"{"id":2,"result":{}}"#);
+    mgr.shutdown();
+    let spans = exporter.0.lock().unwrap();
+    let tool = spans
+        .iter()
+        .find(|s| s.name == "execute_tool fs/read_text_file")
+        .unwrap();
+    assert_eq!(tool.parent_span_id, opentelemetry::trace::SpanId::INVALID);
 }
