@@ -12,6 +12,45 @@ fn invalid_protocol_is_rejected_before_starting_an_agent() {
     assert!(!stderr.contains("failed to spawn"));
 }
 
+#[test]
+fn http_compression_settings_do_not_prevent_agent_startup() {
+    const COMPRESSION_VARIABLES: [&str; 3] = [
+        "OTEL_EXPORTER_OTLP_COMPRESSION",
+        "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+        "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+    ];
+    for protocol in ["http", "http-json"] {
+        for variable in COMPRESSION_VARIABLES {
+            for compression in ["none", "gzip"] {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_acp-traces"));
+                for key in COMPRESSION_VARIABLES {
+                    command.env_remove(key);
+                }
+                let output = command
+                    .args([
+                        "--otlp-protocol",
+                        protocol,
+                        "--otlp-endpoint",
+                        "http://127.0.0.1:1",
+                        "--",
+                        "acp-traces-test-agent-that-does-not-exist",
+                    ])
+                    .env(variable, compression)
+                    .env("OTEL_EXPORTER_OTLP_TIMEOUT", "100")
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // The missing agent is intentional: reaching spawn proves both
+                // exporters initialized without requiring any agent installation.
+                assert!(
+                    stderr.contains("failed to spawn: acp-traces-test-agent-that-does-not-exist"),
+                    "{protocol}, {variable}={compression}: {stderr}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;

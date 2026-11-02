@@ -68,7 +68,9 @@ For an OTLP/HTTP receiver:
 acp-traces --otlp-protocol http --otlp-endpoint http://localhost:4318 -- kiro-cli acp
 ```
 
-HTTP exports use `/v1/traces` and `/v1/metrics` beneath the supplied base URL, preserving any path prefix and query parameters. `http-json` selects JSON encoding; `http` selects protobuf. An explicit `/v1/traces` endpoint is also accepted for compatibility with earlier configurations. Standard OTLP environment variables supported by the Rust exporter can override endpoint/header settings.
+HTTP exports use `/v1/traces` and `/v1/metrics` beneath the supplied base URL, preserving any path prefix and query parameters. `http-json` selects JSON encoding; `http` selects protobuf. An explicit `/v1/traces` endpoint is also accepted for compatibility with earlier configurations.
+
+The development source uses OpenTelemetry 0.33: `--otlp-endpoint` and `--otlp-protocol` take precedence over OTLP environment variables. Headers can still be configured through the exporter's standard environment variables, and `OTEL_EXPORTER_OTLP_TIMEOUT` is in milliseconds. HTTP compression settings support `none` and `gzip`. Published 0.3.1 uses OpenTelemetry 0.28, which permits environment endpoint overrides and interprets that exporter timeout in seconds.
 
 TLS exporter features are not enabled in this build. Use a local collector to forward telemetry to a remote TLS/authenticated backend.
 

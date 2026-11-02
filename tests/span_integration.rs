@@ -10,14 +10,9 @@ use std::sync::{Arc, Mutex};
 struct TestExporter(Arc<Mutex<Vec<SpanData>>>);
 
 impl opentelemetry_sdk::trace::SpanExporter for TestExporter {
-    fn export(
-        &mut self,
-        batch: Vec<SpanData>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send>,
-    > {
+    async fn export(&self, batch: Vec<SpanData>) -> opentelemetry_sdk::error::OTelSdkResult {
         self.0.lock().unwrap().extend(batch);
-        Box::pin(std::future::ready(Ok(())))
+        Ok(())
     }
 }
 
