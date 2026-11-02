@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,10 +21,13 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check release tag matches package version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
           python3 - <<'PY'
           import os
@@ -34,6 +44,7 @@ jobs:
   build:
     needs: validate
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -59,7 +70,9 @@ jobs:
       BUILD_TARGET: ${{ matrix.target }}
       ARTIFACT_NAME: ${{ matrix.artifact }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -78,12 +91,25 @@ jobs:
           src="target/${BUILD_TARGET}/release/acp-traces"
           if [[ "$BUILD_TARGET" == *"windows"* ]]; then src="${src}.exe"; fi
           cp "$src" "$ARTIFACT_NAME"
+      - name: Smoke-test native binary
+        shell: bash
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ "$BUILD_TARGET" != "$host" ]]; then
+            echo "Cross-compiled ${BUILD_TARGET}; execution requires a matching host."
+            exit 0
+          fi
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          actual="$(./"$ARTIFACT_NAME" --version)"
+          [[ "$actual" == "acp-traces $version" ]]
+          ./"$ARTIFACT_NAME" --help
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
   release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -127,7 +153,7 @@ jobs:
 
           cat > formula.rb <<EOF
           class AcpTraces < Formula
-            desc "OTel tracing proxy for Agent Client Protocol"
+            desc "Experimental OpenTelemetry tracing proxy for Agent Client Protocol"
             homepage "https://github.com/AndreKurait/acp-traces"
             license "Apache-2.0"
             version "${VERSION}"
@@ -159,6 +185,7 @@ jobs:
             end
 
             test do
+              assert_match "acp-traces #{version}", shell_output("#{bin}/acp-traces --version")
               assert_match "OTel tracing proxy", shell_output("#{bin}/acp-traces --help")
             end
           end

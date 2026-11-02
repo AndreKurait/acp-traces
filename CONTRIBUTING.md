@@ -39,9 +39,9 @@ Large subsystems or compatibility guarantees need discussion first. The project 
 ## Releases (maintainers)
 
 1. Update `Cargo.toml` and `Cargo.lock` to the intended version, and move the relevant `CHANGELOG.md` entries out of **Unreleased**.
-2. Run the checks above and merge the change after CI passes.
+2. Run the checks above and open a PR. Changes to the release workflow or Cargo manifests also run the six-target release build, with CLI smoke tests on native targets. PR and manual runs upload build artifacts without publishing a release or changing Homebrew. Merge after these checks pass.
 3. Create an annotated `v<version>` tag at that commit and push the tag. The tag must exactly match `Cargo.toml`; the workflow validates it before building.
-4. Inspect all six binary artifacts and the generated `SHA256SUMS` in the release. The workflow builds Linux/macOS/Windows targets but does not execute every cross-compiled binary.
+4. Inspect all six binary artifacts and the generated `SHA256SUMS` in the release. The workflow builds Linux/macOS/Windows targets but does not execute every cross-compiled binary. The tag workflow publishes a GitHub Release; it does not publish to crates.io.
 5. Confirm the Homebrew update job succeeds. It requires the repository's `HOMEBREW_TAP_TOKEN` secret with write access to `AndreKurait/homebrew-tap`.
 
 For releases containing a checksum manifest, Linux users can run `sha256sum --check SHA256SUMS --ignore-missing` beside a downloaded binary; macOS users can compare its `shasum -a 256` output with the matching manifest entry. Existing releases before this workflow change have no checksum manifest.

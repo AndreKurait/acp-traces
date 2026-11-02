@@ -7,7 +7,7 @@
 
 `acp-traces` launches an agent, forwards newline-delimited JSON-RPC between the agent and its client, and observes supported messages to produce traces and metrics. It does not modify the agent or inject fields into the protocol.
 
-This is an experimental project, not a production-ready monitoring agent. Client compatibility and semantic-convention coverage are incomplete. This README describes `main`; installed releases may not include the [unreleased fixes](CHANGELOG.md).
+This is an experimental project, not a production-ready monitoring agent. Client compatibility and semantic-convention coverage are incomplete. This README describes the source tree, which may be ahead of published releases. Check `acp-traces --version` against the [changelog](CHANGELOG.md) for the fixes included in your installation.
 
 ```text
 Client ──stdin──▶ acp-traces ──stdin──▶ Agent
@@ -28,6 +28,8 @@ Published binaries are available through Homebrew or [GitHub Releases](https://g
 brew install AndreKurait/tap/acp-traces
 acp-traces --version
 ```
+
+For an existing Homebrew installation, use `brew upgrade AndreKurait/tap/acp-traces` after the new release reaches the tap. Binary downloads cover Linux, macOS, and Windows on x86-64 and ARM64. Linux binaries target GNU libc, not musl; cross-compilation alone does not establish compatibility with every OS version.
 
 To try the current development code with a stable Rust toolchain:
 
