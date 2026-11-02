@@ -36,8 +36,8 @@ if len(lines) != len(binaries) or set(lines) != expected:
 PY
 
 # Include drafts in the authenticated check. Any failed page stops publication.
-existing="$(gh api --paginate --slurp "repos/$GH_REPO/releases" \
-  --jq ".[][] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
+existing="$(gh api --paginate "repos/$GH_REPO/releases" \
+  --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
 [[ -z "$existing" ]] || { echo "Release already exists" >&2; exit 1; }
 current="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)"
 [[ "$current" == "$RELEASE_COMMIT" ]] || { echo "Release tag moved" >&2; exit 1; }

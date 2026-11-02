@@ -26,6 +26,9 @@ log = pathlib.Path(os.environ["CALL_LOG"])
 calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 with log.open("a") as output:
     output.write(json.dumps(args) + "\n")
+if "--slurp" in args and "--jq" in args:
+    print("gh: --slurp is not supported with --jq", file=sys.stderr)
+    sys.exit(2)
 scenario = os.environ["SCENARIO"]
 if "--paginate" in args:
     if scenario == "lookup-error":
@@ -90,6 +93,11 @@ class PublicationTests(unittest.TestCase):
     def test_success_uploads_complete_set_and_publishes_exact_draft_id(self):
         result, calls = self.run_publication()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls[0],
+            ["api", "--paginate", "repos/owner/repo/releases", "--jq",
+             '.[] | select(.tag_name == "v0.3.1") | .id'],
+        )
         uploads = [call for call in calls if any("uploads.github.com" in value for value in call)]
         self.assertEqual(len(uploads), 7)
         names = {next(value for value in call if "uploads.github.com" in value).split("?name=")[1] for call in uploads}
