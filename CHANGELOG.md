@@ -22,6 +22,7 @@ This project remains a proof of concept.
 - Document POC status, privacy boundaries, unsupported cases, and unreleased-versus-installed behavior.
 - Validate locked dependencies, package metadata, and release tag/version consistency; publish binary checksums for future releases.
 - Build all six release targets on release-preparation PRs and manual checks without publishing; smoke-test binaries that match the runner architecture.
+- Pin all release builds to the validated commit and publish only after uploading the complete, checksum-verified asset set to a new draft; reject existing releases and moved tags.
 
 ### Upgrade notes
 
