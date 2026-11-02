@@ -34,6 +34,14 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - name: Verify explicit HTTP endpoints override environment defaults
+        run: cargo test --locked --bin acp-traces telemetry::tests::http_exports_both_traces_and_metrics_to_their_signal_paths -- --exact
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:1/ignored
+          OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://127.0.0.1:1/ignored
+          OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://127.0.0.1:1/ignored
+          OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+          OTEL_EXPORTER_OTLP_TIMEOUT: "100"
       - name: Test release failure handling without publishing
         if: runner.os == 'Linux'
         run: python3 -B -m unittest discover -s tests -p 'test_release.py'
