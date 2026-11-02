@@ -4,14 +4,15 @@
 
 ### Development
 
-- Update the OpenTelemetry crates together to the 0.31 family and adapt the integration-test exporter to the shared-reference export API.
+- Update the OpenTelemetry crates together to 0.33.1 and adapt the integration-test exporter to the shared-reference export API.
+- Enable HTTP gzip support and check both HTTP protocols with generic and signal-specific `none`/`gzip` compression settings before agent startup.
 - Group future OpenTelemetry dependency updates to avoid incompatible partial upgrades.
 - Update locked anyhow and clap patch versions.
 - Update artifact upload/download actions and verify the complete downloaded binary set during release-preparation checks.
 
 ### Upgrade notes
 
-- In this development source, OpenTelemetry 0.31 treats the configured CLI endpoint/protocol as final; OTLP environment variables no longer override them. Exporter timeout environment variables now use milliseconds rather than seconds.
+- In this development source, OpenTelemetry 0.33 treats the configured CLI endpoint/protocol as final; OTLP environment variables no longer override them. Exporter timeout environment variables now use milliseconds rather than seconds.
 - The updated SDK caps metric cardinality at 2,000 attribute sets per instrument by default, collecting excess sets in an overflow series.
 - These changes are not in the published 0.3.1 binaries.
 
