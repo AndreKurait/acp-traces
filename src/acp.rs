@@ -1,9 +1,18 @@
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     EditorToAgent,
     AgentToEditor,
+}
+
+impl Direction {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::EditorToAgent => Self::AgentToEditor,
+            Self::AgentToEditor => Self::EditorToAgent,
+        }
+    }
 }
 
 #[derive(Debug)]
