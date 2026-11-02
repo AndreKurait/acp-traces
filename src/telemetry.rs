@@ -1,7 +1,8 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider, Resource};
+use url::Url;
 
 pub fn init(
     endpoint: &str,
@@ -23,12 +24,12 @@ pub fn init(
                 SpanExporter::builder()
                     .with_http()
                     .with_protocol(protocol)
-                    .with_endpoint(http_endpoint(endpoint, "traces"))
+                    .with_endpoint(http_endpoint(endpoint, "traces")?)
                     .build()?,
                 MetricExporter::builder()
                     .with_http()
                     .with_protocol(protocol)
-                    .with_endpoint(http_endpoint(endpoint, "metrics"))
+                    .with_endpoint(http_endpoint(endpoint, "metrics")?)
                     .build()?,
             )
         }
@@ -57,18 +58,25 @@ pub fn init(
         .build();
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    tracing::info!(endpoint = %endpoint, protocol = %protocol, "OTel initialized");
+    // Collector URLs may contain authentication query parameters.
+    tracing::info!(protocol = %protocol, "OTel initialized");
     Ok((tracer_provider, meter_provider))
 }
 
-fn http_endpoint(endpoint: &str, signal: &str) -> String {
-    let base = endpoint.trim_end_matches('/');
-    // Accept the explicit trace path supported by earlier versions as well as a base URL.
-    let base = base
+fn http_endpoint(endpoint: &str, signal: &str) -> Result<String> {
+    let mut endpoint = Url::parse(endpoint).context("invalid OTLP HTTP endpoint URL")?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        bail!("OTLP HTTP endpoint must use http:// or https://");
+    }
+    let path = endpoint.path().trim_end_matches('/');
+    // Change only the path so collector prefixes and authentication queries survive.
+    // Accept either explicit signal path for compatibility with earlier configurations.
+    let base = path
         .strip_suffix("/v1/traces")
-        .or_else(|| base.strip_suffix("/v1/metrics"))
-        .unwrap_or(base);
-    format!("{base}/v1/{signal}")
+        .or_else(|| path.strip_suffix("/v1/metrics"))
+        .unwrap_or(path);
+    endpoint.set_path(&format!("{base}/v1/{signal}"));
+    Ok(endpoint.into())
 }
 
 pub fn shutdown(tracer_provider: SdkTracerProvider, meter_provider: SdkMeterProvider) {
@@ -100,10 +108,62 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    #[test]
+    fn http_signal_paths_preserve_collector_prefixes_and_queries() {
+        for (endpoint, signal, expected) in [
+            (
+                "http://localhost:4318/",
+                "traces",
+                "http://localhost:4318/v1/traces",
+            ),
+            (
+                "https://collector/v1/traces?token=x",
+                "metrics",
+                "https://collector/v1/metrics?token=x",
+            ),
+            (
+                "https://collector/otlp?token=a%2Fb&tenant=one",
+                "traces",
+                "https://collector/otlp/v1/traces?token=a%2Fb&tenant=one",
+            ),
+            (
+                "https://collector/otlp/v1/metrics/?token=x",
+                "traces",
+                "https://collector/otlp/v1/traces?token=x",
+            ),
+            (
+                "https://collector/tenant%2Fone/v1/traces?token=a%2Fb",
+                "metrics",
+                "https://collector/tenant%2Fone/v1/metrics?token=a%2Fb",
+            ),
+            (
+                "http://[::1]:4318/otlp/v1/traces",
+                "metrics",
+                "http://[::1]:4318/otlp/v1/metrics",
+            ),
+        ] {
+            assert_eq!(http_endpoint(endpoint, signal).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn http_signal_paths_reject_invalid_urls_and_non_http_schemes() {
+        for endpoint in [
+            "collector/v1/traces",
+            "file:///tmp/collector",
+            "grpc://collector:4317",
+        ] {
+            assert!(http_endpoint(endpoint, "traces").is_err());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn http_exports_both_traces_and_metrics_to_their_signal_paths() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let endpoint = format!(
+            "http://{}/tenant%2Fone/v1/traces?token=test%2Ftoken&tenant=local",
+            listener.local_addr().unwrap()
+        );
         listener.set_nonblocking(true).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
@@ -160,13 +220,11 @@ mod tests {
         shutdown(traces, metrics);
         stopped.store(true, Ordering::Relaxed);
         let requests = server.join().unwrap();
-        assert!(requests
-            .iter()
-            .any(|(path, body)| path == "POST /v1/traces HTTP/1.1"
-                && body.get("resourceSpans").is_some()));
-        assert!(requests
-            .iter()
-            .any(|(path, body)| path == "POST /v1/metrics HTTP/1.1"
-                && body.to_string().contains("test.duration")));
+        assert!(requests.iter().any(|(path, body)| path
+            == "POST /tenant%2Fone/v1/traces?token=test%2Ftoken&tenant=local HTTP/1.1"
+            && body.get("resourceSpans").is_some()));
+        assert!(requests.iter().any(|(path, body)| path
+            == "POST /tenant%2Fone/v1/metrics?token=test%2Ftoken&tenant=local HTTP/1.1"
+            && body.to_string().contains("test.duration")));
     }
 }
